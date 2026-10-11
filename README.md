@@ -31,4 +31,4 @@ Thanks to Nicolás Gudiño, Hamza, Julio Pacheco, and the Issabel Telegram commu
 Run the following command as `root` to start the VOIPIRAN installer:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/voipiran/callcenter-issabel5/master/install-voipiran.sh)
+bash <(curl -fsSL "https://raw.githubusercontent.com/voipiran/callcenter-issabel5/master/install-voipiran.sh?nocache=$(date +%s)")
