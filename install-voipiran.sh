@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # VOIPIRAN - Issabel Call Center Installer
 # ============================================================
 
-REPO_URL="https://github.com/YOUR-GITHUB-USERNAME/callcenter-issabel5.git"
+REPO_URL="https://github.com/voipiran/callcenter-issabel5.git"
 REPO_DIR="/usr/src/callcenter-issabel5"
 INSTALLER="build/5.0/install-issabel-callcenter.sh"
 
@@ -30,14 +30,6 @@ for cmd in git bash; do
     fi
 done
 
-# ------------------------------------------------------------
-# Configure repository
-# ------------------------------------------------------------
-
-if [[ "$REPO_URL" == *"YOUR-GITHUB-USERNAME"* ]]; then
-    echo "[ERROR] Configure REPO_URL with your actual GitHub username."
-    exit 1
-fi
 
 echo
 echo "============================================================"
