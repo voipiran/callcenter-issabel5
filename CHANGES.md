@@ -7,6 +7,110 @@ entries) and `CHANGELOG_OLD.md` (release notes up to 5.0.0-10).
 
 ---
 
+## 5.4.38
+
+- Bug fix: deleting an outgoing campaign removes its calls' current_calls rows first, so a stale row no longer fails the delete with foreign key error 1451
+- Bug fix: deleting an incoming campaign removes its calls' current_call_entry rows first, for the same reason
+- Bug fix: the dialer's sweeper that closes orphaned connected calls also deletes their current_calls rows, so a missed Hangup no longer leaves one behind until the next dialer restart
+
+## 5.4.37
+
+- Bug fix: a dialer task waiting for an answer from a task that was stopped now gives up when it is told to stop, so it exits and is restarted instead of hanging
+- Bug fix: a cycle that gets no answer from AMIEventProcess to its call list places no call, instead of marking rows Placing that nothing dials
+
+## 5.4.36
+
+- Bug fix: a scheduled call whose window passes before it is dialed is closed as Failure with the reason "Scheduled call expired" within one 3-second cycle, instead of staying without a status forever and missing from the campaign's CSV download
+
+## 5.4.35
+
+- Bug fix: campaign finish ignores rows the dialer can never dial (a callback window that passed, an agent row with no window), so the campaign reaches Finished instead of staying Active until its end date
+- Bug fix: a campaign is no longer marked Finished while its last calls are still dialing, so a failed call with retries left is retried
+- Bug fix: the campaign list's Pending Calls counts only calls the dialer can still make, so a Finished campaign shows 0 instead of an expired callback or a DNC number
+
+## 5.3.34
+
+- Bug fix: a due same-agent callback is placed even in a cycle that allocated no agents, instead of pausing its agent until logoff
+- Bug fix: no ordinary call is placed for an agent reserved for a callback, and a free agent is no longer idled beside a due callback
+- Bug fix: a reservation whose callback can no longer be placed is released in the same cycle, not at logoff
+
+## 5.3.33
+
+- Bug fix: the agentconsole ECCP client no longer ships the well-known default password - fresh installs and updates create or leave a random one, and a password an admin set is never overwritten
+- Improve: the 44 eccp-examples take their ECCP credentials from ECCP_SERVER/ECCP_USER/ECCP_PASS instead of a hardcoded default, and refuse to run without a password
+
+## 5.3.32
+
+- Bug fix: a form answer is measured in characters, not bytes - an Arabic answer over 125 characters was refused as too large though its column holds 250 characters
+- Bug fix: a Date form field accepts yyyy-mm-dd hh:mm:ss as its error message always said, and no longer stores a value such as 2026-03-10 dd:30:00 - the date-time check was missing one backslash
+- Bug fix: Calls Detail no longer reads the recording path with a curly-brace string offset, deprecated on PHP 7.4 and an error on PHP 8
+- Bug fix: Call Center Configuration shows a database error and no form when its settings cannot be read, instead of a form of defaults whose Save would overwrite the real settings
+
+## 5.3.31
+
+- Bug fix: an incoming call that leaves its queue before its call_entry row is back from the database (Leave Empty strict with a failover queue) is now recorded abandonada, with its end time, wait, progress entry and recording, instead of staying en-cola for good
+
+## 5.3.30
+
+- Bug fix: Agents Monitoring's login, talk, break and hold columns stop at the shift end and read 00:00:00 before the shift starts, instead of counting on
+- Bug fix: a break, a reload or another agent's status change no longer puts the whole day's totals into Agents Monitoring's shift columns or sets them back - the shift filter is kept in the session
+- Bug fix: an overnight shift on Agents Monitoring and both campaign monitoring panels is the shift in progress once its start hour has passed, as on the agent console
+- Bug fix: the shift label beside the bar names the right days on the agent console and the three monitoring pages, built by the server and translated
+
+## 5.3.29
+
+- Bug fix: a deactivated agent no longer shows as active in the dialer's agent list until a restart - the agent-list refresh copies a same-id status change onto the known agent
+
+## 5.3.28
+
+- Bug fix: the agent console's shift counters stop at the shift end and read 00:00:00 before the shift starts, instead of counting on outside the applied shift
+- Bug fix: a break, hold or call no longer resets the agent console's shift counters to the whole day's totals - the agent's shift filter is kept in the session, also after a reload
+- Bug fix: the shift's break and hold totals count only the part inside the shift, including a break or hold still running
+- Bug fix: an overnight shift (From after To) shows the shift in progress, not last night's
+
+## 5.3.27
+
+- Bug fix: predictive mode no longer counts a queue member whose phone is ringing as a free agent - a campaign could place an extra call for a callback agent while a queue call or any other call was ringing them, though the queue will not ring a ringing member and nothing subtracted the call already ringing them
+
+## 5.3.26
+
+- Bug fix: a renamed agent no longer keeps its old name in the dialer until a restart - the agent-list refresh copies the database name onto a known agent, so QueueAdd, queue_log and the queue member list follow the rename
+- Improve: the Agents and Callback Extensions pages ask the dialer to re-read its agent list right after saving an agent, instead of waiting for its 5-minute timer
+
+## 5.3.25
+
+- Bug fix: a queue member on a live call counts as busy and about to free even when Asterisk has left its device state at RINGING after the answer - predictive campaigns had counted that agent free and predicted no call for it; a member that is only ringing still counts free, and one whose call has ended (device NOT_INUSE) is free even if its AgentComplete was lost
+
+## 5.3.24
+
+- Bug fix: the RPM no longer carries icon_headphones.png or patches the dashboard ProcessesStatus applet on install or erase; both belong to issabel-system
+
+## 5.2.23
+
+- Improve: the RPM package is renamed issabel-callcenter-ce (was issabel-callcenter5), Summary "Issabel v5 Call Center Community Edition"; the build, the CI artifact and the Release asset carry the new name
+
+## 5.2.22
+
+- Improve: a patch file lives only in the newest version that ships it; `build/5.0/prune-patches.sh` deletes older copies (17 removed), `--check` lists them
+
+## 5.2.21
+
+- Bug fix: the dialer's queue refresh (every 5 minutes, on an ECCP refreshagents and on an Asterisk reload) no longer wipes the call start of every busy queue member, which made predictive campaigns stop counting busy agents as about to free until their next call
+
+## 5.2.20
+
+- Bug fix: the Calls Detail report sorts every call by when it entered the queue (datetime_entry_queue; an outbound call that never reached the queue by when it was dialled), newest first - abandoned and failed calls, which have no start time, fell below every answered call in phone-number order
+
+## 5.2.19
+
+- Bug fix: a queue's predicted slots are split between the outgoing campaigns sharing it, by the idle agents each holds, with leftovers rotating - they all went to the first campaign in list order, every cycle in which several campaigns held an idle agent; waiting callers are now subtracted once per queue
+
+## 5.2.18
+
+- Bug fix: a refused Originate records its Failure in call_progress_log - the failure notice carried no status and a raw epoch timestamp, so MariaDB rejected the row and it was lost
+- Bug fix: a database data error (SQLSTATE class 22: bad date, value too long, out of range) is logged and dropped at once, instead of retried 50 times with every dialer database write waiting about 10 minutes behind it
+- Bug fix: a call the dialer cannot place for want of an AMI connection ends as a Failure, like a refused Originate, instead of crashing AMIEventProcess and losing its agents and calls
+
 ## 5.2.17
 
 - New feature: a GitHub Actions workflow (.github/workflows/build-rpm.yml) builds the issabel-callcenter5 RPM on a major release - a VERSION bump outside the last field (5.1.16 -> 5.2.17) - through primasoft-dev/rpm-package-action on Rocky 8, uploads it as an artifact and attaches it to the v<VERSION> GitHub Release; workflow_dispatch builds any version by hand, with the rebuild counter as input

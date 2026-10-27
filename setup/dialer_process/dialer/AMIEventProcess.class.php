@@ -114,6 +114,7 @@ class AMIEventProcess extends TuberiaProcess
         foreach (array('nuevasCampanias',
             'leerTiempoContestar', 'nuevasLlamadasMarcar',
             'contarLlamadasEsperandoRespuesta', 'agentesAgendables',
+            'agentesReservados',
             'infoPrediccionCola', 'ejecutarOriginate') as $k)
             $this->_tuberia->registrarManejador('CampaignProcess', $k, array($this, "rpc_$k"));
 
@@ -906,9 +907,31 @@ class AMIEventProcess extends TuberiaProcess
         if (!$r) $this->_tuberia->enviarRespuesta($sFuente, FALSE);
     }
 
-    private function _idnewcall($tipo_llamada, $uniqueid, $id_call)
+    private function _idnewcall($tipo_llamada, $uniqueid, $id_call, $id_queue_call_entry = NULL)
     {
     	if ($tipo_llamada == 'incoming') {
+    		/* Una llamada entrante puede haberse finalizado (p.ej. expulsada
+    		 * por Leave Empty) antes de que llegara este ID de inserción; la
+    		 * llamada quedó aparcada en la lista, junto con la cola de la
+    		 * inserción. El emparejamiento por (uniqueid, id_queue_call_entry)
+    		 * garantiza que este ID cierre la fila correcta aunque otra cola
+    		 * haya reutilizado el uniqueid, o aunque un insert anterior haya
+    		 * sido descartado por un error permanente de base de datos. */
+    		/* An incoming call may have been finalized (e.g. kicked out by
+    		 * Leave Empty) before this insert ID arrived; the call was left
+    		 * parked in the list, together with the insert's queue. Pairing
+    		 * by (uniqueid, id_queue_call_entry) guarantees this ID closes
+    		 * the right row even when another queue reused the uniqueid, or
+    		 * an earlier insert was discarded by a permanent database
+    		 * error. */
+    		$llamadaFinal = $this->_listaLlamadas->sacarFinalizacionPendiente(
+    		    'incoming', $uniqueid, $id_queue_call_entry);
+    		if (!is_null($llamadaFinal)) {
+    		    $llamadaFinal->aplicarIdLlamadaFinalizada($id_call);
+    		    $this->_log->output('INFO: '.__METHOD__." id=$id_call aplicado a ".
+    		        "llamada finalizada antes de recibir su ID, uniqueid=$uniqueid | EN: id=$id_call applied to a call finalized before its ID arrived, uniqueid=$uniqueid");
+    		    return;
+    		}
     		$llamada = $this->_listaLlamadas->buscar('uniqueid', $uniqueid);
             if (is_null($llamada)) {
             	$this->_log->output('ERR: '.__METHOD__." no se encuentra llamada con tipo=$tipo_llamada id=$id_call | EN: call not found with type=$tipo_llamada id=$id_call");
@@ -980,6 +1003,24 @@ class AMIEventProcess extends TuberiaProcess
             }
         }
         return $ociosos;
+    }
+
+    private function _agentesReservados()
+    {
+        $reservados = array();
+        foreach ($this->_listaAgentes as $a) if ($a->estado_consola == 'logged-in') {
+            /* Solo los agentes reservados sin ninguna llamada: una llamada
+             * agendada en vuelo (llamada_agendada) o una ordinaria en curso
+             * (llamada) nunca debe ser tocada por el barrido.
+             * Only reserved agents with no call at all: a scheduled call in
+             * flight (llamada_agendada) or an ordinary call in progress
+             * (llamada) must never be touched by the sweep. */
+            if ($a->reservado &&
+                is_null($a->llamada) &&
+                is_null($a->llamada_agendada))
+                $reservados[] = $a->channel;
+        }
+        return $reservados;
     }
 
     private function _actualizarConfig($k, $v)
@@ -1475,6 +1516,16 @@ class AMIEventProcess extends TuberiaProcess
             array($this, '_agentesAgendables'), $datos));
     }
 
+    public function rpc_agentesReservados($sFuente, $sDestino, $sNombreMensaje,
+        $iTimestamp, $datos)
+    {
+        if ($this->DEBUG) {
+            $this->_log->output('DEBUG: '.__METHOD__.' recibido/received: '.print_r($datos, 1));
+        }
+        $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
+            array($this, '_agentesReservados'), $datos));
+    }
+
     public function rpc_reportarInfoLlamadasColaEntrante($sFuente, $sDestino,
         $sNombreMensaje, $iTimestamp, $datos)
     {
@@ -1702,6 +1753,36 @@ class AMIEventProcess extends TuberiaProcess
                     $this->_log->output("INFO: agente $sAgente cambió de ID de base de datos pero está ".
                         $a->estado_consola.' | EN: agent '.$sAgente.' changed database ID but is '.$a->estado_consola);
                 }
+            } elseif ($a->name != $tupla['name']) {
+                // Agente renombrado en la base de datos sin cambiar de ID: el
+                // nombre refrescado se descartaba y el dialer seguía ofreciendo
+                // el viejo en QueueAdd hasta el próximo reinicio.
+                // Agent renamed in the database keeping its ID: the refreshed
+                // name used to be dropped here, so the dialer kept offering
+                // the old one in QueueAdd until the next restart.
+                $this->_log->output("INFO: agente $sAgente cambió de nombre de '".
+                    $a->name."' a '".$tupla['name']."' | EN: agent $sAgente renamed from '".
+                    $a->name."' to '".$tupla['name']."'");
+                $a->name = $tupla['name'];
+            }
+
+            // Agente activado o desactivado en la base de datos sin cambiar
+            // de ID (la desactivación de las páginas de agentes es un UPDATE
+            // suave): el estatus refrescado se descartaba y la caché seguía
+            // reportando el agente como activo hasta el próximo reinicio.
+            // Agent activated or deactivated in the database keeping its ID
+            // (the agent pages' deactivation is a soft UPDATE): the refreshed
+            // status used to be dropped here, so the cache kept reporting
+            // the agent active until the next dialer restart.
+            if ($a->id_agent == $tupla['id'] &&
+                $a->estatus != ($tupla['estatus'] == 'A')) {
+                $this->_log->output("INFO: agente $sAgente cambió de estatus de ".
+                    ($a->estatus ? 'ACTIVO' : 'INACTIVO')." a ".
+                    (($tupla['estatus'] == 'A') ? 'ACTIVO' : 'INACTIVO').
+                    " | EN: agent $sAgente changed status from ".
+                    ($a->estatus ? 'ACTIVE' : 'INACTIVE')." to ".
+                    (($tupla['estatus'] == 'A') ? 'ACTIVE' : 'INACTIVE'));
+                $a->estatus = ($tupla['estatus'] == 'A');
             }
 
             // Iniciar pertenencia de agentes dinámicos

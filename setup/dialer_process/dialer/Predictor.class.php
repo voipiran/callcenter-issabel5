@@ -227,10 +227,19 @@ BridgedUniqueID: 1441991139.3
         $this->_enum_complete = TRUE;
     }
 
-    // TODO: Analyze whether AST_DEVICE_RINGING should be counted as free even in predictive mode.
-    // Ringing agents may be receiving a transferred call and should not receive new campaign calls.
-    // TODO: Analizar si AST_DEVICE_RINGING debería contarse como libre incluso en modo predictivo.
-    // Agentes en ringing podrían estar recibiendo una llamada transferida y no deberían recibir nuevas llamadas.
+    // A member on a live call (the bridged-channel scan plus a busy or ringing
+    // device state) stays busy (5.3.25). A member whose device is ringing is
+    // being offered a call (a queue delivery or any other call): the queue will
+    // not ring it again under ringinuse=no, and no counter subtracts the call
+    // already ringing it, so it is not a free agent in any mode; it is free
+    // again once its device reads NOT_INUSE.
+    // Un miembro en llamada viva (el escaneo de canales puenteados más un estado
+    // de dispositivo ocupado o sonando) sigue ocupado (5.3.25). Un miembro cuyo
+    // dispositivo está sonando está recibiendo una oferta de llamada (una
+    // entrega de cola o cualquier otra llamada): la cola no lo volverá a llamar
+    // con ringinuse=no y ningún contador resta la llamada que ya lo está
+    // haciendo sonar, así que no es un agente libre en ningún modo; queda libre
+    // cuando su dispositivo marca NOT_INUSE.
     function infoPrediccionCola($cola, $predictive = true)
     {
         if (!isset($this->_infoColas[$cola])) return NULL;
@@ -249,20 +258,29 @@ BridgedUniqueID: 1441991139.3
             // Paused member is ignored
             if ($miembro['Paused']) continue;
 
+            // Asterisk puede re-publicar un RINGING caducado después de la respuesta y
+            // dejarlo durante toda la llamada; el escaneo de canales puenteados dice
+            // que el miembro está en esa llamada. La guarda por estado del dispositivo
+            // mantiene libre a un miembro cuyo escaneo no vio la llamada, en cuanto su
+            // dispositivo marca NOT_INUSE.
+            // Asterisk can re-publish a stale RINGING after the answer and leave it for
+            // the whole call; the bridged-channel scan says the member is on that call.
+            // The device-state guard keeps a member whose call the scan did not see
+            // free once its device reads NOT_INUSE.
+            $onLiveCall = isset($this->_agentesAppQueue[$interface]) &&
+                in_array($miembro['Status'], array(AST_DEVICE_INUSE, AST_DEVICE_BUSY, AST_DEVICE_RINGINUSE, AST_DEVICE_RINGING));
+
             // Miembro definitivamente libre
             // Member definitely free
-            $freeStatuses = $predictive
-                ? array(AST_DEVICE_NOT_INUSE, AST_DEVICE_RINGING)
-                : array(AST_DEVICE_NOT_INUSE);
-            if (in_array($miembro['Status'], $freeStatuses)) {
+            $freeStatuses = array(AST_DEVICE_NOT_INUSE);
+            if (!$onLiveCall && in_array($miembro['Status'], $freeStatuses)) {
                 $iNumLlamadasColocar['AGENTES_LIBRES']++;
                 $iNumLlamadasColocar['AGENTES_LIBRES_LISTA'][] = $interface;
             }
 
             // Miembro ocupado, se verifica si se desocupará
             // Busy member, verify if it will become free
-            if (in_array($miembro['Status'], array(AST_DEVICE_INUSE, AST_DEVICE_BUSY, AST_DEVICE_RINGINUSE)) &&
-                isset($this->_agentesAppQueue[$interface])) {
+            if ($onLiveCall) {
                 $iNumLlamadasColocar['AGENTES_POR_DESOCUPAR'][] = $this->_agentesAppQueue[$interface];
             }
         }

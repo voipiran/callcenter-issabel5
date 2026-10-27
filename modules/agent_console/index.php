@@ -776,7 +776,10 @@ function manejarSesionActiva_HTML($module_name, &$smarty, $sDirLocalPlantillas, 
     // Query shift-based times for this agent
     // EN: Get agent channel from session (e.g., "SIP/101" or "Agent/8001")
     $agentChannel = $_SESSION['callcenter']['agente'];
-    $shiftRange = agentConsole_calculateShiftDatetimeRange(0, 23);
+    // Se usa el turno guardado en la sesión, no el día completo
+    // EN: The window is the agent's saved shift in the session, not the
+    // whole day; a running pause is already counted by the clamped query
+    $shiftRange = agentConsole_getSessionShiftRange();
     $breakData = agentConsole_consultarTiempoBreakAgentes($shiftRange['start'], $shiftRange['end']);
     $holdData = agentConsole_consultarTiempoHoldAgentes($shiftRange['start'], $shiftRange['end']);
     $loginData = agentConsole_consultarTiempoLoginAgentes($shiftRange['start'], $shiftRange['end']);
@@ -784,17 +787,6 @@ function manejarSesionActiva_HTML($module_name, &$smarty, $sDirLocalPlantillas, 
     $sec_shift_login = isset($loginData[$agentChannel]) ? $loginData[$agentChannel] : 0;
     $sec_shift_break = isset($breakData['breakTimes'][$agentChannel]) ? $breakData['breakTimes'][$agentChannel] : 0;
     $sec_shift_hold = isset($holdData[$agentChannel]) ? $holdData[$agentChannel] : 0;
-
-    // Add current active break/hold time if applicable
-    if (!is_null($estado['pauseinfo'])) {
-        $iCurrentPauseDur = time() - strtotime($estado['pauseinfo']['pausestart']);
-        $holdNames = isset($breakData['holdNames']) ? $breakData['holdNames'] : array();
-        if (in_array($estado['pauseinfo']['pausename'], $holdNames)) {
-            $sec_shift_hold += $iCurrentPauseDur;
-        } else {
-            $sec_shift_break += $iCurrentPauseDur;
-        }
-    }
 
     $smarty->assign(array(
         'SHIFT_LOGIN_TIME' => agentConsole_timestamp_format($sec_shift_login),
@@ -804,6 +796,9 @@ function manejarSesionActiva_HTML($module_name, &$smarty, $sDirLocalPlantillas, 
     $estadoInicial['shift_login_time'] = $sec_shift_login;
     $estadoInicial['shift_break_time'] = $sec_shift_break;
     $estadoInicial['shift_hold_time'] = $sec_shift_hold;
+    $estadoInicial['shift_start_epoch'] = strtotime($shiftRange['start']);
+    $estadoInicial['shift_end_epoch'] = strtotime($shiftRange['end']);
+    $estadoInicial['shift_label'] = agentConsole_shiftRangeLabel($shiftRange);
     $estadoInicial['is_hold_pause'] = (!is_null($estado['pauseinfo']) && in_array($estado['pauseinfo']['pausename'], isset($breakData['holdNames']) ? $breakData['holdNames'] : array()));
 
     // Decidir estado del break a mostrar
@@ -1095,8 +1090,6 @@ function _manejarSesionActiva_HTML_generarInformacion($smarty, $sDirLocalPlantil
                 $comboContactos[$idContacto] = $infoContactoViejo['cedula_ruc'].
                 ' - '.$infoContactoViejo['first_name'].' '.$infoContactoViejo['last_name'];
             } else {
-                /* TODO: dar formato adecuado para cuando contactos de llamadas
-                 * entrantes puedan tener atributos arbitrarios */
                 $comboContactos[$idContacto] = $sDescripcionContacto;
             }
         }
@@ -1444,7 +1437,7 @@ function manejarSesionActiva_saveforms($module_name, $smarty, $sDirLocalPlantill
             if (preg_match('/^field-(\d+)-(\d+)$/', $tupladata[0], $regs)) {
                 $formInfo[$regs[1]][$regs[2]] = $tupladata[1];
                 $_SESSION['callcenter']['ultimo_callsurvey']['call_survey'][$regs[1]][$regs[2]] = array(
-                    'label' =>  '', // TODO: asignar desde formulario de campaña
+                    'label' =>  '',
                     'value' =>  $tupladata[1],
                 );
             }
@@ -1476,6 +1469,15 @@ function manejarSesionActiva_updateShiftTimes($module_name, $smarty,
     $shiftTo = getParameter('shift_to');
     $shiftFrom = is_numeric($shiftFrom) ? intval($shiftFrom) : 0;
     $shiftTo = is_numeric($shiftTo) ? intval($shiftTo) : 23;
+    $shiftFrom = max(0, min(23, $shiftFrom));
+    $shiftTo = max(0, min(23, $shiftTo));
+
+    // Guardar el turno del agente en la sesión: la primera página y cada
+    // evento de estado posterior lo usan
+    // EN: Save the agent's shift in the session: the first page and every
+    // later status event use it
+    $_SESSION['callcenter']['shift_from'] = $shiftFrom;
+    $_SESSION['callcenter']['shift_to'] = $shiftTo;
 
     // Get current agent channel from session
     $agentChannel = $_SESSION['callcenter']['agente'];
@@ -1490,16 +1492,13 @@ function manejarSesionActiva_updateShiftTimes($module_name, $smarty,
     $sec_shift_break = isset($breakData['breakTimes'][$agentChannel]) ? $breakData['breakTimes'][$agentChannel] : 0;
     $sec_shift_hold = isset($holdData[$agentChannel]) ? $holdData[$agentChannel] : 0;
 
-    // Add current pause time if agent is on a pause
+    // La pausa en curso ya la cuenta la consulta, hasta min(ahora, fin del
+    // turno); sólo queda decir si es de tipo hold
+    // EN: a running pause is already counted by the clamped query, up to
+    // min(now, shift end); only whether it is hold-type is left
     $isHoldPause = false;
     if (!is_null($estado['pauseinfo'])) {
-        $iCurrentPauseDur = time() - strtotime($estado['pauseinfo']['pausestart']);
         $isHoldPause = in_array($estado['pauseinfo']['pausename'], isset($breakData['holdNames']) ? $breakData['holdNames'] : array());
-        if ($isHoldPause) {
-            $sec_shift_hold += $iCurrentPauseDur;
-        } else {
-            $sec_shift_break += $iCurrentPauseDur;
-        }
     }
 
     $respuesta = array(
@@ -1507,6 +1506,9 @@ function manejarSesionActiva_updateShiftTimes($module_name, $smarty,
         'shift_break_time' => $sec_shift_break,
         'shift_hold_time'  => $sec_shift_hold,
         'is_hold_pause'    => $isHoldPause,
+        'shift_start_epoch' => strtotime($shiftRange['start']),
+        'shift_end_epoch'   => strtotime($shiftRange['end']),
+        'shift_label'       => agentConsole_shiftRangeLabel($shiftRange),
     );
 
     $json = new Services_JSON();
@@ -2027,9 +2029,10 @@ function manejarSesionActiva_checkStatus($module_name, $smarty,
         }
 
         // Add shift-based times to the response
-        // EN: Calculate shift times for the current agent
+        // EN: The window is the agent's saved shift in the session, not the
+        // whole day; a running pause is already counted by the clamped query
         $agentChannel = $_SESSION['callcenter']['agente'];
-        $shiftRange = agentConsole_calculateShiftDatetimeRange(0, 23);
+        $shiftRange = agentConsole_getSessionShiftRange();
         $breakData = agentConsole_consultarTiempoBreakAgentes($shiftRange['start'], $shiftRange['end']);
         $holdData = agentConsole_consultarTiempoHoldAgentes($shiftRange['start'], $shiftRange['end']);
         $loginData = agentConsole_consultarTiempoLoginAgentes($shiftRange['start'], $shiftRange['end']);
@@ -2039,24 +2042,25 @@ function manejarSesionActiva_checkStatus($module_name, $smarty,
         $sec_shift_hold = isset($holdData[$agentChannel]) ? $holdData[$agentChannel] : 0;
         $holdNames = isset($breakData['holdNames']) ? $breakData['holdNames'] : array();
 
-        // Add current active break/hold time if applicable
         $is_hold_pause = false;
         if (!is_null($estado['pauseinfo'])) {
-            $iCurrentPauseDur = time() - strtotime($estado['pauseinfo']['pausestart']);
-            if (in_array($estado['pauseinfo']['pausename'], $holdNames)) {
-                $sec_shift_hold += $iCurrentPauseDur;
-                $is_hold_pause = true;
-            } else {
-                $sec_shift_break += $iCurrentPauseDur;
-            }
+            $is_hold_pause = in_array($estado['pauseinfo']['pausename'], $holdNames);
         }
 
-        // Add shift times to each response event
+        // Add shift times and the window itself to each response event
+        // EN: The window travels with every shift value, so the browser
+        // never re-derives it
+        $iShiftStart = strtotime($shiftRange['start']);
+        $iShiftEnd = strtotime($shiftRange['end']);
+        $sShiftLabel = agentConsole_shiftRangeLabel($shiftRange);
         foreach ($respuesta as $idx => $evt) {
             $respuesta[$idx]['shift_login_time'] = $sec_shift_login;
             $respuesta[$idx]['shift_break_time'] = $sec_shift_break;
             $respuesta[$idx]['shift_hold_time'] = $sec_shift_hold;
             $respuesta[$idx]['is_hold_pause'] = $is_hold_pause;
+            $respuesta[$idx]['shift_start_epoch'] = $iShiftStart;
+            $respuesta[$idx]['shift_end_epoch'] = $iShiftEnd;
+            $respuesta[$idx]['shift_label'] = $sShiftLabel;
         }
 
         jsonflush($bSSE, $respuesta);
@@ -2219,10 +2223,6 @@ function construirRespuesta_agentlinked($smarty, $sDirLocalPlantillas,
             if (count($infoContactoViejo) == 3) {
                 $sDescripcionContacto = $infoContactoViejo['cedula_ruc'].
                     ' - '.$infoContactoViejo['first_name'].' '.$infoContactoViejo['last_name'];
-            } else {
-                /* TODO: dar formato adecuado para cuando contactos de llamadas
-                 * entrantes puedan tener atributos arbitrarios */
-
             }
 
             /* El htmlentities de clave y valor es necesario porque del lado
@@ -2368,17 +2368,26 @@ function construirUrlExterno($s, $infoLlamada, $chanvars)
 }
 
 // Shift-based time calculation functions for Agent Console
-// EN: Calculate shift datetime range (default full day 00-23)
-function agentConsole_calculateShiftDatetimeRange($fromHour = 0, $toHour = 23)
+// EN: Calculate shift datetime range (default full day 00-23). $now pins the
+// clock for tests. An overnight shift (From > To) names the shift in
+// progress when the current hour is >= From (today From:00:00 to tomorrow
+// To:59:59), and otherwise the last one that ended (yesterday From:00:00 to
+// today To:59:59).
+function agentConsole_calculateShiftDatetimeRange($fromHour = 0, $toHour = 23, $now = NULL)
 {
-    $today = date('Y-m-d');
-    $yesterday = date('Y-m-d', strtotime('-1 day'));
+    $now = is_null($now) ? time() : (int)$now;
+    $today = date('Y-m-d', $now);
     $fromHour = max(0, min(23, (int)$fromHour));
     $toHour = max(0, min(23, (int)$toHour));
 
     if ($fromHour > $toHour) {
-        $datetimeStart = $yesterday . ' ' . sprintf('%02d:00:00', $fromHour);
-        $datetimeEnd = $today . ' ' . sprintf('%02d:59:59', $toHour);
+        if ((int)date('G', $now) >= $fromHour) {
+            $datetimeStart = $today . ' ' . sprintf('%02d:00:00', $fromHour);
+            $datetimeEnd = date('Y-m-d', $now + 86400) . ' ' . sprintf('%02d:59:59', $toHour);
+        } else {
+            $datetimeStart = date('Y-m-d', $now - 86400) . ' ' . sprintf('%02d:00:00', $fromHour);
+            $datetimeEnd = $today . ' ' . sprintf('%02d:59:59', $toHour);
+        }
     } else {
         $datetimeStart = $today . ' ' . sprintf('%02d:00:00', $fromHour);
         $datetimeEnd = $today . ' ' . sprintf('%02d:59:59', $toHour);
@@ -2386,7 +2395,52 @@ function agentConsole_calculateShiftDatetimeRange($fromHour = 0, $toHour = 23)
     return array('start' => $datetimeStart, 'end' => $datetimeEnd);
 }
 
-// EN: Query cumulative break time per agent (Break-type pauses only)
+// EN: The shift window the agent applied, kept in the session by
+// updateShiftTimes; the first page and every status event use it. Default
+// is the full day.
+function agentConsole_getSessionShiftRange()
+{
+    $fromHour = isset($_SESSION['callcenter']['shift_from'])
+        ? (int)$_SESSION['callcenter']['shift_from'] : 0;
+    $toHour = isset($_SESSION['callcenter']['shift_to'])
+        ? (int)$_SESSION['callcenter']['shift_to'] : 23;
+    return agentConsole_calculateShiftDatetimeRange($fromHour, $toHour);
+}
+
+// EN: Build the range label the bar shows beside the filter. The server
+// owns it: it is computed with the window and the same $now, and the
+// browser only displays it. A same-day window renders "<word> HH:00 -
+// HH:59"; an overnight one "<word of start> HH:00 - <word of end> HH:59",
+// each word Yesterday, Today or Tomorrow against the current date.
+function agentConsole_shiftRangeLabel($range, $now = NULL)
+{
+    if (is_null($now)) $now = time();
+    $today = date('Y-m-d', $now);
+    $sStartDate = date('Y-m-d', strtotime($range['start']));
+    $sEndDate = date('Y-m-d', strtotime($range['end']));
+    $sFromHour = date('H', strtotime($range['start']));
+    $sToHour = date('H', strtotime($range['end']));
+
+    // EN: Day word of a range date against the current date. Under the
+    // window rule the start day is always today or yesterday and the end
+    // day tomorrow or today, so only these three words can appear.
+    $dayWord = function ($sDate) use ($today) {
+        if ($sDate == $today) return _tr('Today');
+        if ($sDate == date('Y-m-d', strtotime($today . ' -1 day'))) return _tr('Yesterday');
+        if ($sDate == date('Y-m-d', strtotime($today . ' +1 day'))) return _tr('Tomorrow');
+        return $sDate;
+    };
+
+    if ($sStartDate == $sEndDate) {
+        return $dayWord($sStartDate) . ' ' . $sFromHour . ':00 - ' . $sToHour . ':59';
+    }
+    return $dayWord($sStartDate) . ' ' . $sFromHour . ':00 - '
+        . $dayWord($sEndDate) . ' ' . $sToHour . ':59';
+}
+
+// EN: Query cumulative break time per agent (Break-type pauses only). Every
+// row is clamped into the window: a row crossing an end counts only its
+// in-window part, and a row still open counts up to min(now, window end).
 function agentConsole_consultarTiempoBreakAgentes($datetimeStart = NULL, $datetimeEnd = NULL)
 {
     $result = array('breakTimes' => array(), 'holdNames' => array());
@@ -2407,18 +2461,30 @@ function agentConsole_consultarTiempoBreakAgentes($datetimeStart = NULL, $dateti
         $datetimeEnd = "$sToday 23:59:59";
     }
 
+    $sNow = date('Y-m-d H:i:s');
+    $sActiveEnd = ($sNow < $datetimeEnd) ? $sNow : $datetimeEnd;
+
     $sql = "SELECT CONCAT(agent.type, '/', agent.number) AS agentchannel, " .
-           "SUM(UNIX_TIMESTAMP(audit.datetime_end) - UNIX_TIMESTAMP(audit.datetime_init)) AS sec_breaks " .
+           "SUM(" .
+           "  UNIX_TIMESTAMP(LEAST(COALESCE(audit.datetime_end, :active_end), :end1)) " .
+           "  - UNIX_TIMESTAMP(GREATEST(audit.datetime_init, :start1))" .
+           ") AS sec_breaks " .
            "FROM audit " .
            "INNER JOIN break ON break.id = audit.id_break " .
            "INNER JOIN agent ON agent.id = audit.id_agent " .
            "WHERE break.tipo = 'B' " .
-           "AND audit.datetime_end IS NOT NULL " .
-           "AND audit.datetime_init >= :start " .
-           "AND audit.datetime_init <= :end " .
-           "GROUP BY agent.id";
+           "AND audit.datetime_init <= :end2 " .
+           "AND (audit.datetime_end IS NULL OR audit.datetime_end >= :start2) " .
+           "GROUP BY agent.id " .
+           "HAVING sec_breaks > 0";
     $stmt = $pDB->prepare($sql);
-    $stmt->execute(array(':start' => $datetimeStart, ':end' => $datetimeEnd));
+    $stmt->execute(array(
+        ':active_end' => $sActiveEnd,
+        ':start1'     => $datetimeStart,
+        ':end1'       => $datetimeEnd,
+        ':start2'     => $datetimeStart,
+        ':end2'       => $datetimeEnd,
+    ));
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $result['breakTimes'][$row['agentchannel']] = (int)$row['sec_breaks'];
     }
@@ -2454,18 +2520,31 @@ function agentConsole_consultarTiempoHoldAgentes($datetimeStart = NULL, $datetim
         $datetimeEnd = "$sToday 23:59:59";
     }
 
+    $sNow = date('Y-m-d H:i:s');
+    $sActiveEnd = ($sNow < $datetimeEnd) ? $sNow : $datetimeEnd;
+
+    // EN: clamped into the window like the break and login queries
     $sql = "SELECT CONCAT(agent.type, '/', agent.number) AS agentchannel, " .
-           "SUM(UNIX_TIMESTAMP(audit.datetime_end) - UNIX_TIMESTAMP(audit.datetime_init)) AS sec_holds " .
+           "SUM(" .
+           "  UNIX_TIMESTAMP(LEAST(COALESCE(audit.datetime_end, :active_end), :end1)) " .
+           "  - UNIX_TIMESTAMP(GREATEST(audit.datetime_init, :start1))" .
+           ") AS sec_holds " .
            "FROM audit " .
            "INNER JOIN break ON break.id = audit.id_break " .
            "INNER JOIN agent ON agent.id = audit.id_agent " .
            "WHERE break.tipo = 'H' " .
-           "AND audit.datetime_end IS NOT NULL " .
-           "AND audit.datetime_init >= :start " .
-           "AND audit.datetime_init <= :end " .
-           "GROUP BY agent.id";
+           "AND audit.datetime_init <= :end2 " .
+           "AND (audit.datetime_end IS NULL OR audit.datetime_end >= :start2) " .
+           "GROUP BY agent.id " .
+           "HAVING sec_holds > 0";
     $stmt = $pDB->prepare($sql);
-    $stmt->execute(array(':start' => $datetimeStart, ':end' => $datetimeEnd));
+    $stmt->execute(array(
+        ':active_end' => $sActiveEnd,
+        ':start1'     => $datetimeStart,
+        ':end1'       => $datetimeEnd,
+        ':start2'     => $datetimeStart,
+        ':end2'       => $datetimeEnd,
+    ));
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $result[$row['agentchannel']] = (int)$row['sec_holds'];
     }

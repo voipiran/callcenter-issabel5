@@ -87,7 +87,7 @@ class QueueShadow
 
     function msg_QueueMember($params)
     {
-        if (!isset($this->_queues[$params['Queue']][$params['Location']])) {
+        if (!isset($this->_queues[$params['Queue']]['members'][$params['Location']])) {
             $this->_queues[$params['Queue']]['members'][$params['Location']] = array(
                 'removed'   => FALSE,
                 'Status'    => $params['Status'],
@@ -338,10 +338,16 @@ class QueueShadow
         return $t;
     }
 
-    // TODO: Analyze whether AST_DEVICE_RINGING should be counted as free even in predictive mode.
-    // Ringing agents may be receiving a transferred call and should not receive new campaign calls.
-    // TODO: Analizar si AST_DEVICE_RINGING debería contarse como libre incluso en modo predictivo.
-    // Agentes en ringing podrían estar recibiendo una llamada transferida y no deberían recibir nuevas llamadas.
+    // A member on a live call (LinkStart plus a busy or ringing device state) stays busy (5.3.25).
+    // A member whose device is ringing is being offered a call (a queue delivery or any other
+    // call): the queue will not ring it again under ringinuse=no, and no counter subtracts the
+    // call already ringing it, so it is not a free agent in any mode; it is free again once its
+    // device reads NOT_INUSE.
+    // Un miembro en llamada viva (LinkStart más un estado de dispositivo ocupado o sonando) sigue ocupado (5.3.25).
+    // Un miembro cuyo dispositivo está sonando está recibiendo una oferta de llamada (una entrega
+    // de cola o cualquier otra llamada): la cola no lo volverá a llamar con ringinuse=no y ningún
+    // contador resta la llamada que ya lo está haciendo sonar, así que no es un agente libre en
+    // ningún modo; queda libre cuando su dispositivo marca NOT_INUSE.
     function infoPrediccionCola($queue, $predictive = true)
     {
         if (!isset($this->_queues[$queue])) {
@@ -384,12 +390,22 @@ class QueueShadow
                 'LinkStart' => $miembro['LinkStart']
             );
 
+            // Asterisk puede re-publicar un RINGING caducado después de la respuesta y
+            // dejarlo durante toda la llamada; el LinkStart (AgentConnect) dice que el
+            // miembro está en esa llamada. La guarda por estado del dispositivo mantiene
+            // libre a un miembro cuyo AgentComplete se perdió, en cuanto su dispositivo
+            // marca NOT_INUSE.
+            // Asterisk can re-publish a stale RINGING after the answer and leave it for
+            // the whole call; the LinkStart (AgentConnect) says the member is on that
+            // call. The device-state guard keeps a member whose AgentComplete was lost
+            // free once its device reads NOT_INUSE.
+            $onLiveCall = !is_null($miembro['LinkStart']) &&
+                in_array($miembro['Status'], array(AST_DEVICE_INUSE, AST_DEVICE_BUSY, AST_DEVICE_RINGINUSE, AST_DEVICE_RINGING));
+
             // Miembro definitivamente libre
             // Member definitely free
-            $freeStatuses = $predictive
-                ? array(AST_DEVICE_NOT_INUSE, AST_DEVICE_RINGING)
-                : array(AST_DEVICE_NOT_INUSE);
-            if (in_array($miembro['Status'], $freeStatuses)) {
+            $freeStatuses = array(AST_DEVICE_NOT_INUSE);
+            if (!$onLiveCall && in_array($miembro['Status'], $freeStatuses)) {
                 $iNumLlamadasColocar['AGENTES_LIBRES']++;
                 $iNumLlamadasColocar['AGENTES_LIBRES_LISTA'][] = $miembro_key;
                 $this->_log->output("TIMING: ".__METHOD__.": [AGENT_FREE] Agent=$miembro_key, Status=".$miembro['Status']."(".$this->_getStatusName($miembro['Status'])."), Queue=$queue, predictive=".($predictive?'YES':'NO')." | ES: Agente marcado como libre (predictivo=".($predictive?'SI':'NO').")");
@@ -397,8 +413,10 @@ class QueueShadow
 
             // Miembro ocupado, se verifica si se desocupará
             // Busy member, verify if it will become free
-            if (in_array($miembro['Status'], array(AST_DEVICE_INUSE, AST_DEVICE_BUSY, AST_DEVICE_RINGINUSE)) &&
-                !is_null($miembro['LinkStart'])) {
+            if ($onLiveCall) {
+                if ($miembro['Status'] == AST_DEVICE_RINGING) {
+                    $this->_log->output("TIMING: ".__METHOD__.": [AGENT_ON_CALL] Agent=$miembro_key, Status=".$miembro['Status']."(".$this->_getStatusName($miembro['Status'])."), Queue=$queue, call_age=".sprintf('%.1f', microtime(TRUE) - $miembro['LinkStart'])."s | ES: Agente en llamada aunque su dispositivo figura en RINGING");
+                }
                 $iNumLlamadasColocar['AGENTES_POR_DESOCUPAR'][] = microtime(TRUE) - $miembro['LinkStart'];
             }
         }
